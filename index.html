@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>GoGo — Ride History PDF Maker</title>
+
+<!-- ====== Libraries (loaded from CDN — needs internet the first time) ====== -->
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+
+<style>
+  /* GoGo brand colors */
+  :root{
+    --indigo:#1a1a4c;
+    --cornflower:#454ebd;
+    --yellow:#ffc000;
+    --gray:#f4f5fb;
+    --line:#e2e4f0;
+  }
+  *{box-sizing:border-box}
+  body{
+    font-family:'Open Sans',-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+    margin:0;background:var(--gray);color:var(--indigo);
+  }
+  header{
+    background:var(--indigo);color:#fff;padding:22px 28px;
+    display:flex;align-items:center;gap:14px;
+  }
+  header .logo{font-family:Poppins,'Open Sans',sans-serif;font-weight:800;font-size:26px}
+  header .logo span{color:var(--yellow)}
+  header .tag{opacity:.8;font-size:14px}
+  .wrap{max-width:760px;margin:32px auto;padding:0 20px}
+  .card{background:#fff;border-radius:14px;box-shadow:0 6px 24px rgba(26,26,76,.08);padding:28px;margin-bottom:22px}
+  h2{margin:0 0 6px;font-family:Poppins,sans-serif}
+  p.sub{margin:0 0 20px;color:#6b6f8c;font-size:14px}
+
+  /* Drop zone */
+  #drop{
+    border:2.5px dashed var(--cornflower);border-radius:14px;
+    padding:42px 20px;text-align:center;cursor:pointer;
+    transition:.15s background;background:#fafbff;
+  }
+  #drop.hover{background:#eef0fc}
+  #drop .big{font-size:18px;font-weight:700;margin-bottom:6px}
+  #drop .small{color:#6b6f8c;font-size:13px}
+  #drop .ok{color:var(--cornflower);font-weight:700}
+
+  label{display:block;font-weight:700;font-size:13px;margin:14px 0 6px}
+  input[type=text]{
+    width:100%;padding:11px 13px;border:1.5px solid var(--line);
+    border-radius:9px;font-size:15px;font-family:inherit;
+  }
+  input[type=text]:focus{outline:none;border-color:var(--cornflower)}
+  .row{display:flex;gap:16px}
+  .row>div{flex:1}
+
+  button{
+    margin-top:22px;width:100%;padding:15px;border:none;border-radius:11px;
+    background:var(--cornflower);color:#fff;font-size:16px;font-weight:800;
+    font-family:Poppins,sans-serif;cursor:pointer;transition:.15s;
+  }
+  button:hover:not(:disabled){background:#3640a0}
+  button:disabled{background:#c3c6dd;cursor:not-allowed}
+
+  .summary{display:none;margin-top:18px;padding:16px;background:var(--gray);border-radius:11px;font-size:14px}
+  .summary b{color:var(--cornflower)}
+  .err{display:none;margin-top:14px;color:#c0392b;font-weight:700;font-size:14px}
+  footer{text-align:center;color:#8a8da6;font-size:12px;padding:10px 0 40px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Go<span>Go</span></div>
+  <div class="tag">Ride History → PDF Statement</div>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <h2>Make a customer PDF</h2>
+    <p class="sub">Drop the ride-history CSV from the email, add the customer's name, and download a branded PDF statement.</p>
+
+    <div id="drop">
+      <div class="big" id="dropTitle">Drop the CSV here</div>
+      <div class="small">…or click to choose the file you downloaded from the email</div>
+      <input type="file" id="file" accept=".csv" hidden />
+    </div>
+
+    <label for="cust">Customer name</label>
+    <input type="text" id="cust" placeholder="e.g. Paul Kuntz" />
+
+    <div class="summary" id="summary"></div>
+    <div class="err" id="err"></div>
+
+    <button id="go" disabled>Download PDF statement</button>
+  </div>
+</div>
+
+<footer>Runs entirely in your browser — the file never leaves your computer.</footer>
+
+<script>
+/* ============================================================
+   CONFIG — edit these if GoGo's contact details ever change.
+   ============================================================ */
+const CONTACT = {
+  phone:   "+1 855 464 6872",
+  email:   "support@gogograndparent.com",
+  website: "www.gogograndparent.com"
+};
+
+/* ---------- column matching (case-insensitive, flexible) ---------- */
+function pick(row, names){
+  for(const want of names){
+    for(const key in row){
+      if(key.trim().toLowerCase() === want.toLowerCase()) return row[key];
+    }
+  }
+  return "";
+}
+function num(v){ const n=parseFloat(String(v).replace(/[^0-9.\-]/g,"")); return isNaN(n)?0:n; }
+
+/* ---------- state ---------- */
+let RIDES = null;
+const $ = id => document.getElementById(id);
+
+/* ---------- file handling ---------- */
+const drop = $("drop"), fileInput = $("file");
+drop.addEventListener("click", ()=>fileInput.click());
+drop.addEventListener("dragover", e=>{e.preventDefault();drop.classList.add("hover")});
+drop.addEventListener("dragleave", ()=>drop.classList.remove("hover"));
+drop.addEventListener("drop", e=>{
+  e.preventDefault();drop.classList.remove("hover");
+  if(e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener("change", e=>{ if(e.target.files.length) handleFile(e.target.files[0]); });
+
+function handleFile(file){
+  $("err").style.display="none";
+  if(!file.name.toLowerCase().endsWith(".csv")){
+    showErr("That doesn't look like a .csv file. Please use the file attached to the GoGo email.");
+    return;
+  }
+  Papa.parse(file,{
+    header:true, skipEmptyLines:true,
+    complete: res => {
+      const rows = res.data.filter(r => pick(r,["Request ID","Order Time","Start Location"]));
+      if(!rows.length){ showErr("No rides found in that file. Is it the right CSV?"); return; }
+      RIDES = rows;
+      $("dropTitle").innerHTML = '<span class="ok">✓ '+file.name+'</span>';
+      buildSummary(rows);
+      refreshButton();
+    },
+    error: ()=> showErr("Couldn't read that file. Try downloading it again from the email.")
+  });
+}
+
+function buildSummary(rows){
+  let total=0, refund=0;
+  rows.forEach(r=>{ total+=num(pick(r,["Customer Cost"])); refund+=num(pick(r,["Customer Refund"])); });
+  const dates = rows.map(r=>pick(r,["Order Time"])).filter(Boolean);
+  const s=$("summary");
+  s.style.display="block";
+  s.innerHTML = `<b>${rows.length}</b> rides &nbsp;•&nbsp; total cost <b>$${total.toFixed(2)}</b>`
+    + (refund>0?` &nbsp;•&nbsp; refunds $${refund.toFixed(2)}`:"")
+    + (dates.length?`<br>${dates[dates.length-1]} → ${dates[0]}`:"");
+}
+
+$("cust").addEventListener("input", refreshButton);
+function refreshButton(){ $("go").disabled = !(RIDES && $("cust").value.trim()); }
+function showErr(m){ const e=$("err"); e.textContent=m; e.style.display="block"; }
+
+/* ---------- PDF generation ---------- */
+$("go").addEventListener("click", makePDF);
+
+function makePDF(){
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({unit:"pt", format:"letter"});
+  const W = doc.internal.pageSize.getWidth();
+  const cust = $("cust").value.trim();
+
+  // --- brand colors ---
+  const indigo=[26,26,76], cornflower=[69,78,189], yellow=[255,192,0], gray=[244,245,251];
+
+  // --- header band ---
+  doc.setFillColor(...indigo); doc.rect(0,0,W,86,"F");
+  doc.setFillColor(...yellow); doc.rect(0,86,W,5,"F"); // accent stripe
+  doc.setFont("helvetica","bold"); doc.setFontSize(30);
+  doc.setTextColor(255,255,255); doc.text("Go", 40, 54);
+  doc.setTextColor(...yellow);    doc.text("Go", 40+doc.getTextWidth("Go"), 54);
+  doc.setFont("helvetica","normal"); doc.setFontSize(13); doc.setTextColor(255,255,255);
+  doc.text("Ride History Statement", W-40, 50, {align:"right"});
+
+  // --- customer / date block ---
+  let y=120;
+  doc.setTextColor(...indigo); doc.setFont("helvetica","bold"); doc.setFontSize(11);
+  doc.text("PREPARED FOR", 40, y);
+  doc.setFont("helvetica","normal"); doc.setFontSize(15);
+  doc.text(cust, 40, y+20);
+
+  const dates = RIDES.map(r=>pick(r,["Order Time"])).filter(Boolean);
+  if(dates.length){
+    doc.setFont("helvetica","bold"); doc.setFontSize(11);
+    doc.text("PERIOD", W-40, y, {align:"right"});
+    doc.setFont("helvetica","normal"); doc.setFontSize(12);
+    doc.text(`${dates[dates.length-1]}  to  ${dates[0]}`, W-40, y+18, {align:"right"});
+  }
+
+  // --- build table ---
+  let total=0, refundTotal=0;
+  const body = RIDES.map(r=>{
+    const cost = num(pick(r,["Customer Cost"]));
+    total += cost;
+    refundTotal += num(pick(r,["Customer Refund"]));
+    return [
+      pick(r,["Order Time"]),
+      pick(r,["Start Location"]),
+      pick(r,["End Location"]),
+      num(pick(r,["Distance"])).toFixed(1),
+      num(pick(r,["Duration"])).toFixed(0),
+      "$"+cost.toFixed(2)
+    ];
+  });
+
+  doc.autoTable({
+    startY:y+44,
+    head:[["Date","From","To","Miles","Min","Cost"]],
+    body,
+    theme:"grid",
+    styles:{font:"helvetica",fontSize:8.5,cellPadding:5,textColor:[40,40,60],lineColor:[226,228,240]},
+    headStyles:{fillColor:cornflower,textColor:[255,255,255],fontStyle:"bold",fontSize:9},
+    alternateRowStyles:{fillColor:gray},
+    columnStyles:{
+      0:{cellWidth:88},
+      3:{halign:"right",cellWidth:42},
+      4:{halign:"right",cellWidth:38},
+      5:{halign:"right",cellWidth:55,fontStyle:"bold"}
+    },
+    margin:{left:40,right:40}
+  });
+
+  // --- totals box ---
+  let ty = doc.lastAutoTable.finalY + 18;
+  if(ty > doc.internal.pageSize.getHeight()-90){ doc.addPage(); ty=60; }
+  const boxX=W-240;
+  doc.setFillColor(...gray); doc.roundedRect(boxX,ty,200,refundTotal>0?70:46,8,8,"F");
+  doc.setTextColor(...indigo); doc.setFont("helvetica","normal"); doc.setFontSize(11);
+  doc.text("Total rides",        boxX+16, ty+22); doc.text(String(RIDES.length), boxX+184, ty+22, {align:"right"});
+  if(refundTotal>0){
+    doc.text("Refunds", boxX+16, ty+40);
+    doc.text("-$"+refundTotal.toFixed(2), boxX+184, ty+40, {align:"right"});
+  }
+  const ly = refundTotal>0 ? ty+62 : ty+40;
+  doc.setFont("helvetica","bold"); doc.setFontSize(13);
+  doc.text("Total cost", boxX+16, ly);
+  doc.text("$"+total.toFixed(2), boxX+184, ly, {align:"right"});
+
+  // --- footer on every page ---
+  const pages = doc.internal.getNumberOfPages();
+  for(let p=1;p<=pages;p++){
+    doc.setPage(p);
+    const H=doc.internal.pageSize.getHeight();
+    doc.setDrawColor(...cornflower); doc.setLineWidth(.5); doc.line(40,H-48,W-40,H-48);
+    doc.setFont("helvetica","normal"); doc.setFontSize(9); doc.setTextColor(120,124,150);
+    doc.text(`GoGoGrandparent   •   ${CONTACT.phone}   •   ${CONTACT.email}`, 40, H-32);
+    doc.text(CONTACT.website, 40, H-20);
+    doc.text(`Page ${p} of ${pages}`, W-40, H-20, {align:"right"});
+  }
+
+  const safe = cust.replace(/[^a-z0-9]+/gi,"_");
+  doc.save(`GoGo_Statement_${safe}.pdf`);
+}
+</script>
+</body>
+</html>
